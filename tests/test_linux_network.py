@@ -177,6 +177,26 @@ class NetworkIntegration(unittest.TestCase):
         self.assertTrue(self.connects(self.client, "10.203.0.1"))
         self.command("nft", "list", "table", "inet", "unrelated", namespace=self.server)
 
+    def test_pause_resume_ip_and_network_configuration(self):
+        self.echo_server(self.server, "10.203.0.1")
+        for key, entry in (("ips", "10.203.0.2"), ("cidrs", "10.203.0.0/24")):
+            with self.subTest(key=key):
+                cfg = app.validate_config({"rescue_ips": ["10.203.0.3"], key: [entry]})
+                self.rules(app.build_allowlist(cfg))
+                client = self.start(self.client, PERSISTENT_CLIENT, "10.203.0.1", 8080)
+                self.assertEqual(self.read_line(client), "connected")
+                cfg["paused"] = {key: [entry]}
+                self.rules(app.build_allowlist(cfg))
+                client.stdin.write("continue\n")
+                client.stdin.flush()
+                self.assertEqual(self.read_line(client), "blocked")
+                self.assertFalse(self.connects(self.client, "10.203.0.1"))
+                cfg["paused"] = {}
+                self.rules(app.build_allowlist(cfg))
+                self.assertTrue(self.connects(self.client, "10.203.0.1"))
+                self.assertEqual(cfg[key], [entry])
+        self.command("nft", "list", "table", "inet", "unrelated", namespace=self.server)
+
     def test_ipv6_delete_and_explicit_deny(self):
         self.echo_server(self.server, "fd42:203::1")
         self.rules(["fd42:203::2", "fd42:203::3"])

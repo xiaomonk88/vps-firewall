@@ -87,7 +87,7 @@ PROVINCE_NAMES = list(dict.fromkeys(
 DEFAULTS = dict(enabled=True, rescue_ips=[], provinces=[], cidrs=[], ips=[],
                 blocked_ips=[], allow_ping=True, allow_all_ipv6=False,
                 protect_dnat=True,
-                watch_interval=5, province_refresh=86400, province_source_base="", notes={})
+                watch_interval=5, province_refresh=86400, province_source_base="", notes={}, paused={})
 LABELS = dict(rescue_ips="管理/抢救地址", provinces="省份白名单",
               cidrs="网段白名单", ips="单 IP 白名单", blocked_ips="禁止访问")
 LIST_KEYS = tuple(LABELS)
@@ -217,6 +217,17 @@ def validate_config(raw):
                     raise AppError("同一条目的备注冲突：" + item)
                 group[item] = value
     cfg["notes"] = notes
+    if not isinstance(cfg["paused"], dict) or set(cfg["paused"]) - set(NOTE_KEYS):
+        raise AppError("暂停条目仅支持 ips、cidrs、provinces 分类")
+    paused = {}
+    for key, entries in cfg["paused"].items():
+        if not isinstance(entries, list) or not all(isinstance(item, str) for item in entries):
+            raise AppError("%s 暂停条目必须是字符串数组" % key)
+        normalized = {normalize_entry(key, item) for item in entries}
+        retained = [item for item in cfg[key] if item in normalized]
+        if retained:
+            paused[key] = retained
+    cfg["paused"] = paused
     if cfg["enabled"] and not cfg["rescue_ips"]:
         raise AppError("开启过滤至少保留一个管理/抢救地址，请先添加备用管理地址")
     blocked = [ipaddress.ip_address(x) for x in cfg["blocked_ips"]]
@@ -239,15 +250,19 @@ def dump_config(cfg):
     lines = ["# vps-firewall配置；手动修改后自动重载。菜单保存会重新整理格式。",
              "# 白名单取并集；禁止访问优先；管理地址不得与禁止地址重叠。"]
     for key in DEFAULTS:
-        if key == "notes":
-            if not cfg["notes"]:
-                lines.append("notes = {}")
+        if key in ("notes", "paused"):
+            if not cfg[key]:
+                lines.append(key + " = {}")
             continue
         value = cfg[key]
         if key in LABELS:
             lines.append("\n# " + LABELS[key])
         # JSON strings, lists and booleans are valid for this TOML schema.
         lines.append(key + " = " + json.dumps(value, ensure_ascii=False))
+    if cfg["paused"]:
+        lines.append("\n[paused]")
+        for key, entries in cfg["paused"].items():
+            lines.append(key + " = " + json.dumps(entries, ensure_ascii=False))
     for key in NOTE_KEYS:
         entries = cfg["notes"].get(key, {})
         if entries:
@@ -317,11 +332,17 @@ def fetch_provinces(provinces, refresh_seconds, base_urls, force=False, write_ca
     return result
 
 
+def active_entries(cfg, key):
+    paused = set(cfg.get("paused", {}).get(key, ()))
+    return [item for item in cfg[key] if item not in paused]
+
+
 def build_allowlist(cfg, force_refresh=False, write_cache=True):
-    allow = set(cfg["rescue_ips"] + cfg["cidrs"] + cfg["ips"])
-    if cfg["provinces"]:
+    allow = set(cfg["rescue_ips"] + active_entries(cfg, "cidrs") + active_entries(cfg, "ips"))
+    provinces = active_entries(cfg, "provinces")
+    if provinces:
         bases = ([cfg["province_source_base"]] if cfg["province_source_base"] else []) + DEFAULT_PROVINCE_BASES
-        allow.update(fetch_provinces(cfg["provinces"], cfg["province_refresh"], bases,
+        allow.update(fetch_provinces(provinces, cfg["province_refresh"], bases,
                                     force=force_refresh, write_cache=write_cache))
     # No runtime SSH discovery: a removed address must never silently return.
     return allow
@@ -599,13 +620,13 @@ def matching_sources(cfg, address, use_cache=True):
     ip = ipaddress.ip_address(address)
     reasons = []
     for key in ("rescue_ips", "ips", "cidrs"):
-        for item in cfg[key]:
+        for item in active_entries(cfg, key):
             if ip in ipaddress.ip_network(item, strict=False):
                 reasons.append("%s：%s" % (LABELS[key], item))
     if ip.version == 6 and cfg["allow_all_ipv6"]:
         reasons.append("全部 IPv6 放行开关")
     if ip.version == 4 and use_cache:
-        for name in cfg["provinces"]:
+        for name in active_entries(cfg, "provinces"):
             path = Path(CACHE_DIR) / (resolve_province_code(name) + ".txt")
             if not path.exists():
                 log("省份 %s 缓存缺失，无法确认其是否覆盖该 IP" % name)
@@ -635,7 +656,7 @@ def status():
         for key in LIST_KEYS:
             print("\n  %s · %d 项" % (LIST_TITLES[key], len(cfg[key])))
             if key in NOTE_KEYS:
-                entry_table(cfg[key], cfg.get("notes", {}).get(key, {}))
+                entry_table(cfg[key], cfg.get("notes", {}).get(key, {}), paused=cfg["paused"].get(key, ()))
             else:
                 for item in cfg[key]:
                     print("    " + item)
@@ -718,7 +739,10 @@ def table(rows, headers=None, sections=None):
     columns = len(headers) if headers else len(rows[0])
     total = table_width()
     widths = [total - 4] if columns == 1 else [4, total - 26, 12]
-    if headers and headers[-1] == "备注":
+    if columns == 4:
+        available = total - 23
+        widths = [4, available // 2, 6, available - available // 2]
+    elif headers and headers[-1] == "备注":
         available = total - 14
         widths = [4, available // 2, available - available // 2]
 
@@ -755,9 +779,11 @@ def menu_table(rows, sections=None):
     table(rows, headers=("编号", "功能", "数量 / 状态"), sections=sections)
 
 
-def entry_table(items, notes, offset=0):
-    rows = [(offset + index + 1, item, notes.get(item, "—")) for index, item in enumerate(items)]
-    table(rows or [("—", "暂无条目", "—")], headers=("编号", "条目", "备注"))
+def entry_table(items, notes, offset=0, paused=()):
+    paused = set(paused)
+    rows = [(offset + index + 1, item, "暂停" if item in paused else "启用", notes.get(item, "—"))
+            for index, item in enumerate(items)]
+    table(rows or [("—", "暂无条目", "—", "—")], headers=("编号", "条目", "状态", "备注"))
 
 
 def notice(message):
@@ -855,14 +881,14 @@ def split_values(text):
     return [x for x in re.split(r"[,，、;；\s]+", text.strip()) if x]
 
 
-def list_page(title, items, page=0, selected=(), notes=None):
+def list_page(title, items, page=0, selected=(), notes=None, paused=()):
     heading(title)
     pages = max(1, (len(items) + PAGE_SIZE - 1) // PAGE_SIZE)
     print("  共 %d 项 · 第 %d / %d 页\n" % (len(items), page + 1, pages))
     if notes is not None:
-        entry_table(items[page * PAGE_SIZE:(page + 1) * PAGE_SIZE], notes, page * PAGE_SIZE)
+        entry_table(items[page * PAGE_SIZE:(page + 1) * PAGE_SIZE], notes, page * PAGE_SIZE, paused=paused)
     else:
-        rows = [(index + 1, items[index], "已添加" if items[index] in selected else "")
+        rows = [(index + 1, items[index], "已暂停" if items[index] in paused else "已添加" if items[index] in selected else "")
                 for index in range(page * PAGE_SIZE, min((page + 1) * PAGE_SIZE, len(items)))]
         table(rows or [("—", "暂无条目", "")], headers=("编号", "条目", "状态"))
     print()
@@ -882,11 +908,11 @@ def next_page(value, page, pages):
     return None
 
 
-def province_input(selected=()):
+def province_input(selected=(), paused=()):
     page = 0
     message = ""
     while True:
-        pages = list_page("省份白名单 / 添加", PROVINCE_NAMES, page, selected)
+        pages = list_page("省份白名单 / 添加", PROVINCE_NAMES, page, selected, paused=paused)
         print("\n  输入编号或名称；支持多个，例如：1 2 或 北京,广东。")
         notice(message)
         value = read_choice("添加省份 [0 取消]：")
@@ -912,7 +938,8 @@ def view_list(key):
         items = cfg[key]
         page = min(page, max(0, (len(items) - 1) // PAGE_SIZE))
         pages = list_page(LIST_TITLES[key] + " / 完整列表", items, page,
-                          notes=cfg["notes"].get(key, {}) if key in NOTE_KEYS else None)
+                          notes=cfg["notes"].get(key, {}) if key in NOTE_KEYS else None,
+                          paused=cfg["paused"].get(key, ()))
         value = read_choice("选择 [0 返回]：")
         if value in ("0", ""):
             return
@@ -921,11 +948,11 @@ def view_list(key):
             page = target
 
 
-def select_entries(key, items, notes=None, action="移除"):
+def select_entries(key, items, notes=None, action="移除", paused=()):
     page = 0
     message = ""
     while True:
-        pages = list_page(LIST_TITLES[key] + " / 选择要%s的条目" % action, items, page, notes=notes)
+        pages = list_page(LIST_TITLES[key] + " / 选择要%s的条目" % action, items, page, notes=notes, paused=paused)
         print("\n  可输入多个编号或范围，例如：1 3 或 2-5。")
         notice(message)
         value = read_choice(action + "编号 [0 取消]：")
@@ -1005,8 +1032,9 @@ def edit_list(key):
         print("  " + LIST_HINTS[key])
         print("\n  当前列表 · %d 项" % len(items))
         notes = cfg["notes"].get(key, {}) if key in NOTE_KEYS else None
+        paused = set(cfg["paused"].get(key, ()))
         if notes is not None:
-            entry_table(items[:5], notes)
+            entry_table(items[:5], notes, paused=paused)
         else:
             for item in items[:5]:
                 print("    · " + item)
@@ -1018,7 +1046,7 @@ def edit_list(key):
         actions = [(1, "添加", ""), (2, "解除禁止" if key == "blocked_ips" else "移除", ""),
                    (3, "查看完整列表", "")]
         if key in NOTE_KEYS:
-            actions.append((4, "修改备注", ""))
+            actions.extend([(4, "修改备注", ""), (5, "暂停条目", ""), (6, "启用条目", "")])
         actions.append((0, "返回白名单管理" if key in NOTE_KEYS else "返回主菜单", ""))
         menu_table(actions)
         notice(message)
@@ -1032,7 +1060,7 @@ def edit_list(key):
         try:
             if choice == "1":
                 if key == "provinces":
-                    raw = province_input(items)
+                    raw = province_input(items, paused=paused)
                 else:
                     heading(LIST_TITLES[key] + " / 添加")
                     print("  " + LIST_HINTS[key])
@@ -1060,7 +1088,7 @@ def edit_list(key):
                 if not items:
                     message = "列表为空，没有可移除的条目。"
                     continue
-                selected = select_entries(key, items, notes=notes)
+                selected = select_entries(key, items, notes=notes, paused=paused)
                 if not selected:
                     message = "已取消移除。"
                     continue
@@ -1068,7 +1096,7 @@ def edit_list(key):
                 heading(LIST_TITLES[key] + " / 确认移除")
                 print("  已选择 %d 项：\n" % len(selected))
                 if notes is not None:
-                    entry_table([item for item in items if item in selected], notes)
+                    entry_table([item for item in items if item in selected], notes, paused=paused)
                 else:
                     for item in sorted(selected):
                         print("    · " + item)
@@ -1104,10 +1132,35 @@ def edit_list(key):
                 if not items:
                     message = "列表为空，请先添加条目。"
                     continue
-                selected = select_entries(key, items, notes=notes, action="修改备注")
+                selected = select_entries(key, items, notes=notes, action="修改备注", paused=paused)
                 if not selected or not input_notes(candidate, key, [item for item in items if item in selected], editing=True):
                     message = "已取消修改备注。"
                     continue
+            elif choice in ("5", "6") and key in NOTE_KEYS:
+                action = "暂停" if choice == "5" else "启用"
+                if not items:
+                    message = "列表为空，请先添加条目。"
+                    continue
+                selected = select_entries(key, items, notes=notes, action=action, paused=paused)
+                if not selected:
+                    message = "已取消%s。" % action
+                    continue
+                changed = [item for item in items if item in selected and (item not in paused if choice == "5" else item in paused)]
+                if not changed:
+                    message = "所选条目已经处于%s状态。" % action
+                    continue
+                heading(LIST_TITLES[key] + " / " + action)
+                entry_table(changed, notes, paused=paused)
+                if choice == "5":
+                    print("  暂停后保留条目和备注，但不再使用该条目放行。")
+                    print("  其他已启用白名单、直通IP及访问设置仍可能放行该地址。")
+                else:
+                    print("  启用后重新使用该条目放行；禁止列表仍然优先。")
+                if not confirm("确认%s以上 %d 项？" % (action, len(changed))):
+                    message = "已取消%s。" % action
+                    continue
+                new_paused = paused | set(changed) if choice == "5" else paused - set(changed)
+                candidate["paused"][key] = [item for item in items if item in new_paused]
             else:
                 message = "请输入菜单中的编号。"
                 continue

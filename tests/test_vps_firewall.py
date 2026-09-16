@@ -544,5 +544,131 @@ class NoteMenu(Workspace):
         self.assertIn("完整列表", self.output.getvalue())
 
 
+class PausedConfig(unittest.TestCase):
+    def test_old_configuration_enables_every_entry(self):
+        cfg = app.validate_config({"rescue_ips": ["192.0.2.1"], "ips": ["192.0.2.8"]})
+        self.assertEqual(cfg["paused"], {})
+        self.assertIn("192.0.2.8", app.build_allowlist(cfg))
+
+    def test_pause_roundtrip_normalizes_and_preserves_notes(self):
+        cfg = config(ips=["2001:db8::ABCD"], cidrs=["192.0.2.18/24"], provinces=["广东省"],
+                     notes={"ips": {"2001:db8::abcd": "张三"}},
+                     paused={"ips": ["2001:db8::ABCD"], "cidrs": ["192.0.2.9/24"], "provinces": ["粤"]})
+        self.assertEqual(cfg["paused"], {"ips": ["2001:db8::abcd"], "cidrs": ["192.0.2.0/24"], "provinces": ["广东"]})
+        self.assertEqual(tomllib.loads(app.dump_config(cfg)), cfg)
+        self.assertEqual(cfg["notes"]["ips"]["2001:db8::abcd"], "张三")
+
+    def test_invalid_pause_config_rejected(self):
+        for paused in ([], {"rescue_ips": ["192.0.2.1"]}, {"blocked_ips": []}, {"ips": "192.0.2.8"},
+                       {"ips": [5]}, {"ips": ["invalid"]}, {"provinces": ["不存在"]}):
+            with self.subTest(paused=paused), self.assertRaises(app.AppError):
+                config(paused=paused)
+
+    def test_paused_entries_do_not_generate_rules_or_download_provinces(self):
+        cfg = config(ips=["192.0.2.8", "2001:db8::8"], cidrs=["198.51.100.0/24"], provinces=["广东"],
+                     paused={"ips": ["192.0.2.8", "2001:db8::8"], "cidrs": ["198.51.100.0/24"], "provinces": ["广东"]})
+        with patch.object(app, "fetch_provinces") as fetch:
+            self.assertEqual(app.build_allowlist(cfg, force_refresh=True), {"192.0.2.1"})
+            self.assertEqual(app.prepare(cfg), app.prepare(config()))
+            fetch.assert_not_called()
+
+    def test_only_enabled_provinces_are_requested(self):
+        cfg = config(provinces=["广东", "北京"], paused={"provinces": ["广东"]})
+        with patch.object(app, "fetch_provinces", return_value={"198.51.100.0/24"}) as fetch:
+            self.assertEqual(app.build_allowlist(cfg), {"192.0.2.1", "198.51.100.0/24"})
+        self.assertEqual(fetch.call_args.args[0], ["北京"])
+
+    def test_removing_entry_cleans_pause_and_notes(self):
+        cfg = config(ips=["192.0.2.8"], notes={"ips": {"192.0.2.8": "张三"}}, paused={"ips": ["192.0.2.8"]})
+        result = app.revoke_addresses(cfg, ["192.0.2.8"])
+        self.assertEqual(result["paused"], {})
+        self.assertEqual(result["notes"], {})
+
+
+class PausedMenu(Workspace):
+    def setUp(self):
+        super().setUp()
+        self.install_fake_nft()
+        app.atomic_write(Path(app.CACHE_DIR) / "440000.txt", "198.51.100.0/24\n")
+
+    def edit(self, key, choices, source=None):
+        with patch.object(app, "read_choice", side_effect=choices), patch.object(app, "ssh_source", return_value=source):
+            app.edit_list(key)
+
+    def test_pause_resume_all_types_keep_entry_and_note(self):
+        for key, entry in (("ips", "192.0.2.8"), ("cidrs", "198.51.100.0/24"), ("provinces", "广东")):
+            with self.subTest(key=key):
+                cfg = config(**{key: [entry]}, notes={key: {entry: "张三"}})
+                app.atomic_write(app.CONFIG_PATH, app.dump_config(cfg))
+                app.apply_once()
+                enabled_rules = self.rules
+                self.edit(key, ["5", "1", "1", "0"])
+                paused = app.load_config()
+                self.assertEqual(paused[key], [entry])
+                self.assertEqual(paused["notes"][key][entry], "张三")
+                self.assertEqual(paused["paused"][key], [entry])
+                self.assertNotEqual(self.rules, enabled_rules)
+                self.edit(key, ["6", "1", "1", "0"])
+                self.assertEqual(app.load_config(), cfg)
+                self.assertEqual(self.rules, enabled_rules)
+
+    def test_pause_can_be_cancelled_and_batch_selected(self):
+        cfg = config(ips=["192.0.2.8", "192.0.2.9"])
+        app.atomic_write(app.CONFIG_PATH, app.dump_config(cfg))
+        self.edit("ips", ["5", "1-2", "0", "0"])
+        self.assertEqual(app.load_config(), cfg)
+        self.assertFalse(self.calls)
+        self.edit("ips", ["5", "1-2", "1", "0"])
+        self.assertEqual(app.load_config()["paused"]["ips"], cfg["ips"])
+        self.edit("ips", ["6", "2", "1", "0"])
+        self.assertEqual(app.load_config()["paused"]["ips"], ["192.0.2.8"])
+
+    def test_pause_ssh_source_requires_extra_confirmation(self):
+        cfg = config(ips=["192.0.2.8"])
+        app.atomic_write(app.CONFIG_PATH, app.dump_config(cfg))
+        self.edit("ips", ["5", "1", "1", "0", "0"], source="192.0.2.8")
+        self.assertEqual(app.load_config(), cfg)
+        self.assertFalse(self.calls)
+        self.assertIn("将失去权限", self.output.getvalue())
+
+    def test_paused_sources_are_ignored_but_other_coverage_remains(self):
+        cfg = config(ips=["198.51.100.8"], cidrs=["198.51.100.0/24"], provinces=["广东"],
+                     paused={"ips": ["198.51.100.8"], "provinces": ["广东"]})
+        self.assertEqual(app.matching_sources(cfg, "198.51.100.8"), ["网段白名单：198.51.100.0/24"])
+        cfg["paused"]["cidrs"] = cfg["cidrs"]
+        self.assertEqual(app.matching_sources(cfg, "198.51.100.8"), [])
+
+    def test_pause_persists_through_boot_and_rollback_restores_enabled_state(self):
+        cfg = config(ips=["192.0.2.8"], notes={"ips": {"192.0.2.8": "张三"}})
+        app.atomic_write(app.CONFIG_PATH, app.dump_config(cfg))
+        app.apply_once()
+        enabled_rules = self.rules
+        self.edit("ips", ["5", "1", "1", "0"])
+        paused_rules = self.rules
+        self.rules = ""
+        app.boot()
+        self.assertEqual(self.rules, paused_rules)
+        app.rollback()
+        self.assertEqual(app.load_config(), cfg)
+        self.assertEqual(self.rules, enabled_rules)
+
+    def test_duplicate_add_and_note_edit_do_not_resume_entry(self):
+        cfg = config(ips=["192.0.2.8"], notes={"ips": {"192.0.2.8": "张三"}}, paused={"ips": ["192.0.2.8"]})
+        app.atomic_write(app.CONFIG_PATH, app.dump_config(cfg))
+        self.edit("ips", ["1", "192.0.2.8", "4", "1", "李四", "0"])
+        self.assertEqual(app.load_config()["paused"], cfg["paused"])
+        self.assertEqual(app.load_config()["notes"]["ips"]["192.0.2.8"], "李四")
+
+    def test_failed_pause_preserves_saved_state(self):
+        cfg = config(ips=["192.0.2.8"])
+        app.atomic_write(app.CONFIG_PATH, app.dump_config(cfg))
+        app.apply_once()
+        previous_state = app.read_state()
+        with patch.object(app, "nft", side_effect=app.AppError("rejected rules")):
+            self.edit("ips", ["5", "1", "1", "0"])
+        self.assertEqual(app.load_config(), cfg)
+        self.assertEqual(app.read_state(), previous_state)
+
+
 if __name__ == "__main__":
     unittest.main()
