@@ -737,10 +737,12 @@ def render_home(cfg, active, source=None, synced=True, message=""):
         (0, "退出", ""),
     ], sections={0: "一、IP管理", 4: "二、系统控制", 7: "三、版本控制", 9: ""})
     notice(message)
-    if not synced:
+    if not synced or cfg["enabled"] != active:
         print("\n  提醒：配置尚未同步，请到“维护与日志”检查。")
-    print("\n  防护：" + protection_status(cfg, active))
-    print("  当前登录 IP：" + (source or "未检测到"))
+    state = "开启" if active else "关闭"
+    if sys.stdout.isatty() and os.environ.get("TERM") != "dumb" and "NO_COLOR" not in os.environ:
+        state = "\033[%sm%s\033[0m" % ("32" if active else "31", state)
+    print("\n  防火墙：%s  当前IP：%s" % (state, source or "未检测到"))
 
 
 def whitelist_menu():
