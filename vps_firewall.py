@@ -1266,12 +1266,73 @@ def options_menu():
             message = "操作未完成：" + str(exc)
 
 
+def local_province_packages():
+    packages = []
+    for name in PROVINCE_NAMES:
+        path = Path(CACHE_DIR) / (resolve_province_code(name) + ".txt")
+        if not path.is_file():
+            continue
+        package = {"name": name, "networks": None, "updated_at": None, "error": ""}
+        try:
+            # Read metadata and contents from the same file even if a refresh replaces its path.
+            with path.open("rb") as stream:
+                package["updated_at"] = os.fstat(stream.fileno()).st_mtime
+                data = stream.read(8 * 1024 * 1024 + 1)
+            if len(data) > 8 * 1024 * 1024:
+                raise AppError("缓存过大")
+            package["networks"] = len(parse_province(data.decode("utf-8")))
+        except FileNotFoundError:
+            continue
+        except (OSError, UnicodeError, AppError):
+            package["error"] = "缓存无效或无法读取"
+        packages.append(package)
+    return packages
+
+
+def view_local_province_packages():
+    page = 0
+    while True:
+        packages = local_province_packages()
+        cfg = load_config()
+        selected = set(cfg["provinces"])
+        paused = set(cfg["paused"].get("provinces", ()))
+        pages = max(1, (len(packages) + PAGE_SIZE - 1) // PAGE_SIZE)
+        page = min(page, pages - 1)
+        heading("维护与日志 / 本地省份包")
+        print("  本地共 %d 个省份包 · 第 %d / %d 页\n" % (len(packages), page + 1, pages))
+        rows = []
+        for index in range(page * PAGE_SIZE, min((page + 1) * PAGE_SIZE, len(packages))):
+            package = packages[index]
+            name = package["name"]
+            usage = "暂停" if name in paused else "启用" if name in selected else "未选用"
+            updated = (time.strftime("%Y.%m.%d %H:%M", time.localtime(package["updated_at"]))
+                       if package["updated_at"] is not None else "更新时间未知")
+            detail = package["error"] or "%d 个网段" % package["networks"]
+            rows.append((index + 1, name, usage, detail + "\n" + updated))
+        table(rows or [("—", "暂无本地省份包", "—", "添加省份后自动下载")],
+              headers=("编号", "省份", "使用", "本地数据"))
+        print("\n  本地数据显示网段数量和缓存更新时间。")
+        print("  使用状态对应省份白名单设置；本页不会触发下载。")
+        if page + 1 < pages:
+            print("  n. 下一页")
+        if page:
+            print("  p. 上一页")
+        print("  0. 返回")
+        value = read_choice("选择 [0 返回]：")
+        if value in ("0", ""):
+            return
+        target = next_page(value, page, pages)
+        if target is not None:
+            page = target
+
+
 def maintenance_menu():
     message = ""
     while True:
         heading("维护与日志")
         menu_table([(1, "查看运行状态", ""), (2, "刷新省份数据", ""),
                     (3, "恢复上一版配置", ""), (4, "查看最近日志", ""),
+                    (5, "查看本地省份包", ""),
                     (0, "返回主菜单", "")])
         notice(message)
         choice = read_choice("请选择：")
@@ -1311,6 +1372,8 @@ def maintenance_menu():
                 result = run(["journalctl", "-u", "vps-firewall", "-n", "40", "--no-pager"])
                 print(result.stdout or result.stderr)
                 pause()
+            elif choice == "5":
+                view_local_province_packages()
             else:
                 message = "请输入菜单中的编号。"
         except (AppError, OSError, ValueError) as exc:

@@ -769,5 +769,55 @@ class FirewallSynchronization(Workspace):
         self.assertIn("实际规则表：存在", self.output.getvalue())
 
 
+class LocalProvincePackages(Workspace):
+    def test_missing_cache_directory_stays_absent(self):
+        self.assertEqual(app.local_province_packages(), [])
+        self.assertFalse(Path(app.CACHE_DIR).exists())
+        with patch.object(app, "read_choice", side_effect=["0"]):
+            app.view_local_province_packages()
+        self.assertIn("暂无本地省份包", self.output.getvalue())
+        self.assertFalse(Path(app.CACHE_DIR).exists())
+
+    def test_lists_real_cache_including_unselected_and_invalid_packages(self):
+        cache = Path(app.CACHE_DIR)
+        app.atomic_write(cache / "440000.txt", "192.0.2.0/24\n192.0.2.0/24\n198.51.100.0/24\n")
+        app.atomic_write(cache / "110000.txt", "not a network")
+        app.atomic_write(cache / "README.txt", "ignored")
+        (cache / "310000.txt").mkdir()
+        os.utime(cache / "440000.txt", (1234567890, 1234567890))
+        packages = {package["name"]: package for package in app.local_province_packages()}
+        self.assertEqual(set(packages), {"广东", "北京"})
+        self.assertEqual(packages["广东"]["networks"], 2)
+        self.assertEqual(packages["广东"]["updated_at"], 1234567890)
+        self.assertEqual(packages["广东"]["error"], "")
+        self.assertIsNone(packages["北京"]["networks"])
+        self.assertTrue(packages["北京"]["error"])
+
+    def test_view_reports_usage_without_download_or_mutation(self):
+        cache = Path(app.CACHE_DIR)
+        for code in ("110000", "440000", "310000"):
+            app.atomic_write(cache / (code + ".txt"), "192.0.2.0/24\n")
+        app.atomic_write(app.CONFIG_PATH, app.dump_config(config(provinces=["北京", "广东"], paused={"provinces": ["广东"]})))
+        before = {path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in cache.iterdir()}
+        with patch.object(app, "read_choice", side_effect=["0"]), \
+                patch.object(app, "fetch_provinces", side_effect=AssertionError("must not download")), \
+                patch.object(app, "nft", side_effect=AssertionError("must not modify rules")), \
+                patch.object(app, "atomic_write", side_effect=AssertionError("must not write files")):
+            app.view_local_province_packages()
+        self.assertEqual(before, {path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in cache.iterdir()})
+        output = self.output.getvalue()
+        for name, state in (("北京", "启用"), ("广东", "暂停"), ("上海", "未选用")):
+            self.assertTrue(any(name in line and state in line for line in output.splitlines()), output)
+
+    def test_paging_keeps_global_numbers_and_returns_to_maintenance(self):
+        for name in app.PROVINCE_NAMES[:13]:
+            app.atomic_write(Path(app.CACHE_DIR) / (app.resolve_province_code(name) + ".txt"), "192.0.2.0/24\n")
+        with patch.object(app, "read_choice", side_effect=["5", "n", "0", "0"]):
+            app.maintenance_menu()
+        output = self.output.getvalue()
+        self.assertIn("第 2 / 2 页", output)
+        self.assertTrue(any("13" in line and app.PROVINCE_NAMES[12] in line for line in output.splitlines()))
+
+
 if __name__ == "__main__":
     unittest.main()
