@@ -411,7 +411,7 @@ class Menu(Workspace):
 
     def test_batch_add_then_delete(self):
         self.install_fake_nft()
-        answers = iter(["1", "192.0.2.8, 2001:db8::8", "2", "1 2", "y", "0"])
+        answers = iter(["1", "192.0.2.8, 2001:db8::8", "", "", "2", "1 2", "y", "0"])
         with patch.object(app, "read_choice", side_effect=lambda _: next(answers)), \
                 patch.object(app, "ssh_source", return_value=None):
             app.edit_list("ips")
@@ -455,6 +455,93 @@ class Menu(Workspace):
             app.edit_list("ips")
         self.assertEqual(app.load_config()["ips"], [])
         self.assertFalse(self.calls)
+
+
+class NoteConfig(unittest.TestCase):
+    def test_old_configuration_defaults_to_no_notes(self):
+        self.assertEqual(app.validate_config({"rescue_ips": ["192.0.2.1"]})["notes"], {})
+
+    def test_notes_roundtrip_and_follow_normalized_entries(self):
+        cfg = config(ips=["2001:db8::ABCD"], cidrs=["192.0.2.18/24"], provinces=["广东省"],
+                     notes={"ips": {"2001:db8::abcd": '张三 "手机" \\ 备用 #1'},
+                            "cidrs": {"192.0.2.18/24": "公司网络"}, "provinces": {"粤": "广东客户"}})
+        self.assertEqual(cfg["notes"]["cidrs"], {"192.0.2.0/24": "公司网络"})
+        self.assertEqual(cfg["notes"]["provinces"], {"广东": "广东客户"})
+        self.assertEqual(tomllib.loads(app.dump_config(cfg)), cfg)
+
+    def test_rejects_invalid_notes_and_conflicting_aliases(self):
+        for notes in ([], {"unknown": {}}, {"ips": []}, {"ips": {"192.0.2.8": 5}},
+                      {"ips": {"192.0.2.8": "a" * 121}}, {"ips": {"192.0.2.8": "a\nb"}},
+                      {"ips": {"192.0.2.8": "\033[31mred"}},
+                      {"provinces": {"广东": "one", "粤": "two"}}):
+            with self.subTest(notes=notes), self.assertRaises(app.AppError):
+                config(ips=["192.0.2.8"], provinces=["广东"], notes=notes)
+
+    def test_removed_entries_drop_notes_without_mutating_input(self):
+        cfg = config(ips=["192.0.2.8"], notes={"ips": {"192.0.2.8": "张三"}})
+        candidate = copy.deepcopy(cfg)
+        candidate["ips"] = []
+        self.assertEqual(app.validate_config(candidate)["notes"], {})
+        self.assertEqual(cfg["notes"]["ips"]["192.0.2.8"], "张三")
+        self.assertEqual(app.revoke_addresses(cfg, ["192.0.2.8"])["notes"], {})
+
+
+class NoteMenu(Workspace):
+    def setUp(self):
+        super().setUp()
+        self.install_fake_nft()
+        fetch = patch.object(app, "fetch_provinces", return_value=set())
+        fetch.start()
+        self.addCleanup(fetch.stop)
+
+    def edit(self, key, choices):
+        with patch.object(app, "read_choice", side_effect=choices), \
+                patch.object(app, "ssh_source", return_value=None):
+            app.edit_list(key)
+
+    def test_add_notes_for_ip_network_and_province(self):
+        for key, entry, canonical in (("ips", "2001:db8::ABCD", "2001:db8::abcd"),
+                                      ("cidrs", "192.0.2.18/24", "192.0.2.0/24"),
+                                      ("provinces", "粤", "广东")):
+            with self.subTest(key=key):
+                self.edit(key, ["1", entry, "张三", "0"])
+                self.assertEqual(app.load_config()["notes"][key][canonical], "张三")
+        self.assertIn("备注", self.output.getvalue())
+        self.assertIn("张三", self.output.getvalue())
+
+    def test_batch_notes_can_be_skipped_and_cancelled_without_partial_save(self):
+        self.edit("ips", ["1", "192.0.2.8 192.0.2.9", "张三", "0", "0"])
+        self.assertEqual(app.load_config()["ips"], [])
+        self.assertEqual(app.load_config()["notes"], {})
+        self.assertFalse(self.calls)
+        self.edit("ips", ["1", "192.0.2.8 192.0.2.9", "张三", "", "0"])
+        self.assertEqual(app.load_config()["notes"]["ips"], {"192.0.2.8": "张三"})
+
+    def test_edit_clear_and_rollback_notes_preserve_addresses_and_rules(self):
+        self.edit("ips", ["1", "192.0.2.8", "张三", "0"])
+        rules = self.rules
+        self.edit("ips", ["4", "1", "李四", "0"])
+        self.assertEqual(app.load_config()["notes"]["ips"]["192.0.2.8"], "李四")
+        self.assertEqual(self.rules, rules)
+        self.edit("ips", ["4", "1", "-", "0"])
+        self.assertEqual(app.load_config()["notes"], {})
+        self.assertEqual(app.load_config()["ips"], ["192.0.2.8"])
+        app.rollback()
+        self.assertEqual(app.load_config()["notes"]["ips"]["192.0.2.8"], "李四")
+        self.assertEqual(self.rules, rules)
+
+    def test_duplicate_add_preserves_note_and_removal_cleans_it_up(self):
+        self.edit("ips", ["1", "192.0.2.8", "张三", "0"])
+        self.edit("ips", ["1", "192.0.2.8", "0"])
+        self.assertEqual(app.load_config()["notes"]["ips"]["192.0.2.8"], "张三")
+        self.edit("ips", ["2", "1", "1", "0"])
+        self.assertEqual(app.load_config()["notes"], {})
+
+    def test_edit_cancel_keeps_note_and_full_list_shows_it(self):
+        self.edit("ips", ["1", "192.0.2.8", "张三", "0"])
+        self.edit("ips", ["4", "1", "0", "3", "0", "0"])
+        self.assertEqual(app.load_config()["notes"]["ips"]["192.0.2.8"], "张三")
+        self.assertIn("完整列表", self.output.getvalue())
 
 
 if __name__ == "__main__":

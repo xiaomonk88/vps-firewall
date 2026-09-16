@@ -87,10 +87,11 @@ PROVINCE_NAMES = list(dict.fromkeys(
 DEFAULTS = dict(enabled=True, rescue_ips=[], provinces=[], cidrs=[], ips=[],
                 blocked_ips=[], allow_ping=True, allow_all_ipv6=False,
                 protect_dnat=True,
-                watch_interval=5, province_refresh=86400, province_source_base="")
+                watch_interval=5, province_refresh=86400, province_source_base="", notes={})
 LABELS = dict(rescue_ips="管理/抢救地址", provinces="省份白名单",
               cidrs="网段白名单", ips="单 IP 白名单", blocked_ips="禁止访问")
 LIST_KEYS = tuple(LABELS)
+NOTE_KEYS = ("ips", "cidrs", "provinces")
 
 
 class AppError(Exception):
@@ -150,6 +151,26 @@ def resolve_province_code(name):
     return PROVINCE_CODES.get(str(name).strip())
 
 
+def normalize_entry(key, item):
+    if key == "provinces":
+        code = resolve_province_code(item)
+        if not code:
+            raise AppError("未知省份：%s" % item)
+        return next(n for n in PROVINCE_NAMES if PROVINCE_CODES[n] == code)
+    return norm(item)
+
+
+def validate_note(value):
+    if not isinstance(value, str):
+        raise AppError("备注必须是文字")
+    if any(unicodedata.category(char) == "Cc" for char in value):
+        raise AppError("备注不能包含换行或控制字符")
+    value = value.strip()
+    if len(value) > 120:
+        raise AppError("备注最多 120 个字符")
+    return value
+
+
 def validate_config(raw):
     unknown = set(raw) - set(DEFAULTS)
     if unknown:
@@ -173,18 +194,29 @@ def validate_config(raw):
             raise AppError("%s 必须是字符串数组" % key)
         entries = []
         for item in cfg[key]:
-            if key == "provinces":
-                code = resolve_province_code(item)
-                if not code:
-                    raise AppError("未知省份：%s" % item)
-                value = next(n for n in PROVINCE_NAMES if PROVINCE_CODES[n] == code)
-            else:
-                value = norm(item)
-                if key in ("ips", "blocked_ips") and "/" in value:
-                    raise AppError("%s 只接受单 IP；网段请放到网段白名单" % LABELS[key])
+            value = normalize_entry(key, item)
+            if key in ("ips", "blocked_ips") and "/" in value:
+                raise AppError("%s 只接受单 IP；网段请放到网段白名单" % LABELS[key])
             if value not in entries:
                 entries.append(value)
         cfg[key] = entries
+    if not isinstance(cfg["notes"], dict) or set(cfg["notes"]) - set(NOTE_KEYS):
+        raise AppError("备注仅支持 ips、cidrs、provinces 分类")
+    notes = {}
+    for key, entries in cfg["notes"].items():
+        if not isinstance(entries, dict):
+            raise AppError("%s 备注必须是条目与文字的对应表" % key)
+        for item, value in entries.items():
+            if not isinstance(item, str):
+                raise AppError("备注条目必须是字符串")
+            item = normalize_entry(key, item)
+            value = validate_note(value)
+            if item in cfg[key] and value:
+                group = notes.setdefault(key, {})
+                if item in group and group[item] != value:
+                    raise AppError("同一条目的备注冲突：" + item)
+                group[item] = value
+    cfg["notes"] = notes
     if cfg["enabled"] and not cfg["rescue_ips"]:
         raise AppError("开启过滤至少保留一个管理/抢救地址，请先添加备用管理地址")
     blocked = [ipaddress.ip_address(x) for x in cfg["blocked_ips"]]
@@ -207,11 +239,21 @@ def dump_config(cfg):
     lines = ["# vps-firewall配置；手动修改后自动重载。菜单保存会重新整理格式。",
              "# 白名单取并集；禁止访问优先；管理地址不得与禁止地址重叠。"]
     for key in DEFAULTS:
+        if key == "notes":
+            if not cfg["notes"]:
+                lines.append("notes = {}")
+            continue
         value = cfg[key]
         if key in LABELS:
             lines.append("\n# " + LABELS[key])
         # JSON strings, lists and booleans are valid for this TOML schema.
         lines.append(key + " = " + json.dumps(value, ensure_ascii=False))
+    for key in NOTE_KEYS:
+        entries = cfg["notes"].get(key, {})
+        if entries:
+            lines.append("\n[notes.%s]" % key)
+            for item, note in entries.items():
+                lines.append(json.dumps(item, ensure_ascii=False) + " = " + json.dumps(note, ensure_ascii=False))
     return "\n".join(lines) + "\n"
 
 
@@ -592,9 +634,12 @@ def status():
             print("  最近生效：" + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(current["applied_at"])))
         for key in LIST_KEYS:
             print("\n  %s · %d 项" % (LIST_TITLES[key], len(cfg[key])))
-            for item in cfg[key]:
-                print("    " + item)
-            if not cfg[key]:
+            if key in NOTE_KEYS:
+                entry_table(cfg[key], cfg.get("notes", {}).get(key, {}))
+            else:
+                for item in cfg[key]:
+                    print("    " + item)
+            if not cfg[key] and key not in NOTE_KEYS:
                 print("    暂无")
         return cfg
 
@@ -673,6 +718,9 @@ def table(rows, headers=None, sections=None):
     columns = len(headers) if headers else len(rows[0])
     total = table_width()
     widths = [total - 4] if columns == 1 else [4, total - 26, 12]
+    if headers and headers[-1] == "备注":
+        available = total - 14
+        widths = [4, available // 2, available - available // 2]
 
     def border(left, middle, right):
         print("  " + left + middle.join("─" * (width + 2) for width in widths) + right)
@@ -705,6 +753,11 @@ def table(rows, headers=None, sections=None):
 
 def menu_table(rows, sections=None):
     table(rows, headers=("编号", "功能", "数量 / 状态"), sections=sections)
+
+
+def entry_table(items, notes, offset=0):
+    rows = [(offset + index + 1, item, notes.get(item, "—")) for index, item in enumerate(items)]
+    table(rows or [("—", "暂无条目", "—")], headers=("编号", "条目", "备注"))
 
 
 def notice(message):
@@ -802,13 +855,16 @@ def split_values(text):
     return [x for x in re.split(r"[,，、;；\s]+", text.strip()) if x]
 
 
-def list_page(title, items, page=0, selected=()):
+def list_page(title, items, page=0, selected=(), notes=None):
     heading(title)
     pages = max(1, (len(items) + PAGE_SIZE - 1) // PAGE_SIZE)
     print("  共 %d 项 · 第 %d / %d 页\n" % (len(items), page + 1, pages))
-    rows = [(index + 1, items[index], "已添加" if items[index] in selected else "")
-            for index in range(page * PAGE_SIZE, min((page + 1) * PAGE_SIZE, len(items)))]
-    table(rows or [("—", "暂无条目", "")], headers=("编号", "条目", "状态"))
+    if notes is not None:
+        entry_table(items[page * PAGE_SIZE:(page + 1) * PAGE_SIZE], notes, page * PAGE_SIZE)
+    else:
+        rows = [(index + 1, items[index], "已添加" if items[index] in selected else "")
+                for index in range(page * PAGE_SIZE, min((page + 1) * PAGE_SIZE, len(items)))]
+        table(rows or [("—", "暂无条目", "")], headers=("编号", "条目", "状态"))
     print()
     if page + 1 < pages:
         print("  n. 下一页")
@@ -852,9 +908,11 @@ def province_input(selected=()):
 def view_list(key):
     page = 0
     while True:
-        items = load_config()[key]
+        cfg = load_config()
+        items = cfg[key]
         page = min(page, max(0, (len(items) - 1) // PAGE_SIZE))
-        pages = list_page(LIST_TITLES[key] + " / 完整列表", items, page)
+        pages = list_page(LIST_TITLES[key] + " / 完整列表", items, page,
+                          notes=cfg["notes"].get(key, {}) if key in NOTE_KEYS else None)
         value = read_choice("选择 [0 返回]：")
         if value in ("0", ""):
             return
@@ -863,14 +921,14 @@ def view_list(key):
             page = target
 
 
-def select_entries(key, items):
+def select_entries(key, items, notes=None, action="移除"):
     page = 0
     message = ""
     while True:
-        pages = list_page(LIST_TITLES[key] + " / 选择要移除的条目", items, page)
+        pages = list_page(LIST_TITLES[key] + " / 选择要%s的条目" % action, items, page, notes=notes)
         print("\n  可输入多个编号或范围，例如：1 3 或 2-5。")
         notice(message)
-        value = read_choice("移除编号 [0 取消]：")
+        value = read_choice(action + "编号 [0 取消]：")
         target = next_page(value, page, pages)
         if target is not None:
             page = target
@@ -914,6 +972,30 @@ def revoke_addresses(cfg, addresses):
     return validate_config(candidate)
 
 
+def input_notes(candidate, key, items, editing=False):
+    notes = candidate["notes"].setdefault(key, {})
+    for item in items:
+        while True:
+            print("\n  条目：" + item)
+            if editing:
+                print("  当前备注：" + notes.get(item, "—"))
+            prompt = "备注 [回车保留，- 清空，0 取消]：" if editing else "备注 [可留空，0 取消添加]："
+            value = read_choice(prompt)
+            if value == "0":
+                return False
+            try:
+                value = validate_note(value)
+            except AppError as exc:
+                print("  " + str(exc))
+                continue
+            if editing and value == "-":
+                notes.pop(item, None)
+            elif value:
+                notes[item] = value
+            break
+    return True
+
+
 def edit_list(key):
     message = ""
     while True:
@@ -922,17 +1004,23 @@ def edit_list(key):
         heading(LIST_TITLES[key])
         print("  " + LIST_HINTS[key])
         print("\n  当前列表 · %d 项" % len(items))
-        for item in items[:5]:
-            print("    · " + item)
+        notes = cfg["notes"].get(key, {}) if key in NOTE_KEYS else None
+        if notes is not None:
+            entry_table(items[:5], notes)
+        else:
+            for item in items[:5]:
+                print("    · " + item)
         if len(items) > 5:
             print("    … 还有 %d 项，可选择“查看完整列表”。" % (len(items) - 5))
         if not items:
             print("    暂无，选择“添加”开始设置。")
         print()
-        menu_table([(1, "添加", ""),
-                    (2, "解除禁止" if key == "blocked_ips" else "移除", ""),
-                    (3, "查看完整列表", ""),
-                    (0, "返回白名单管理" if key in ("ips", "cidrs", "provinces") else "返回主菜单", "")])
+        actions = [(1, "添加", ""), (2, "解除禁止" if key == "blocked_ips" else "移除", ""),
+                   (3, "查看完整列表", "")]
+        if key in NOTE_KEYS:
+            actions.append((4, "修改备注", ""))
+        actions.append((0, "返回白名单管理" if key in NOTE_KEYS else "返回主菜单", ""))
+        menu_table(actions)
         notice(message)
         choice = read_choice("请选择：")
         message = ""
@@ -963,19 +1051,27 @@ def edit_list(key):
                             message = "已取消添加。"
                             continue
                         candidate["blocked_ips"] = [x for x in cfg["blocked_ips"] if x not in blocked]
+                candidate = validate_config(candidate)
+                added = [item for item in candidate[key] if item not in items]
+                if key in NOTE_KEYS and added and not input_notes(candidate, key, added):
+                    message = "已取消添加。"
+                    continue
             elif choice == "2":
                 if not items:
                     message = "列表为空，没有可移除的条目。"
                     continue
-                selected = select_entries(key, items)
+                selected = select_entries(key, items, notes=notes)
                 if not selected:
                     message = "已取消移除。"
                     continue
                 candidate[key] = [x for x in items if x not in selected]
                 heading(LIST_TITLES[key] + " / 确认移除")
                 print("  已选择 %d 项：\n" % len(selected))
-                for item in sorted(selected):
-                    print("    · " + item)
+                if notes is not None:
+                    entry_table([item for item in items if item in selected], notes)
+                else:
+                    for item in sorted(selected):
+                        print("    · " + item)
                 if key == "ips":
                     overlaps = []
                     for address in sorted(selected):
@@ -1004,6 +1100,14 @@ def edit_list(key):
             elif choice == "3":
                 view_list(key)
                 continue
+            elif choice == "4" and key in NOTE_KEYS:
+                if not items:
+                    message = "列表为空，请先添加条目。"
+                    continue
+                selected = select_entries(key, items, notes=notes, action="修改备注")
+                if not selected or not input_notes(candidate, key, [item for item in items if item in selected], editing=True):
+                    message = "已取消修改备注。"
+                    continue
             else:
                 message = "请输入菜单中的编号。"
                 continue

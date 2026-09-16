@@ -25,3 +25,14 @@ watch_interval = 5
 province_refresh = 86400
 # 自定义源优先，其次尝试内置源和镜像。
 province_source_base = ""
+
+# IP、网段和省份备注；菜单自动维护，旧配置可省略。
+notes = {}
+# 手动填写时，先删除上面的 notes = {}，再按以下格式添加表。
+# 备注对应的条目必须同时存在于 ips / cidrs / provinces 列表中。
+# [notes.ips]
+# "203.0.113.8" = "张三手机"
+# [notes.cidrs]
+# "198.51.100.0/24" = "办公室网络"
+# [notes.provinces]
+# "广东" = "广东客户"
