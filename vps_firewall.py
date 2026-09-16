@@ -663,11 +663,15 @@ def wrap_cell(text, width):
     return lines
 
 
+def table_width():
+    return max(30, min(60, shutil.get_terminal_size((80, 24)).columns - 4))
+
+
 def table(rows, headers=None, sections=None):
     """Render CJK-aware borders; wrap long addresses instead of cutting them off."""
     rows = [tuple(str(cell) for cell in row) for row in rows]
     columns = len(headers) if headers else len(rows[0])
-    total = max(30, min(60, shutil.get_terminal_size((80, 24)).columns - 4))
+    total = table_width()
     widths = [total - 4] if columns == 1 else [4, total - 26, 12]
 
     def border(left, middle, right):
@@ -740,9 +744,18 @@ def render_home(cfg, active, source=None, synced=True, message=""):
     if not synced or cfg["enabled"] != active:
         print("\n  提醒：配置尚未同步，请到“维护与日志”检查。")
     state = "开启" if active else "关闭"
+    left_width = display_width("防火墙：" + state)
+    right = "当前IP：" + (source or "未检测到")
+    width = table_width()
+    gap = width - left_width - display_width(right)
     if sys.stdout.isatty() and os.environ.get("TERM") != "dumb" and "NO_COLOR" not in os.environ:
         state = "\033[%sm%s\033[0m" % ("32" if active else "31", state)
-    print("\n  防火墙：%s  当前IP：%s" % (state, source or "未检测到"))
+    if gap >= 1:
+        print("\n  防火墙：%s%s%s" % (state, " " * gap, right))
+    else:
+        print("\n  防火墙：" + state)
+        for line in wrap_cell(right, width):
+            print("  " + " " * (width - display_width(line)) + line)
 
 
 def whitelist_menu():
