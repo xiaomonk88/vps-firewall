@@ -28,6 +28,9 @@ try:
 except OSError:
     APP_VERSION = "未知"
 
+# Release date, kept with the code so older GitHub installers also carry it forward.
+APP_RELEASE_DATE = "2026.09.16"
+
 CONFIG_PATH = "/etc/vps-firewall/config.toml"
 DATA_DIR = "/var/lib/vps-firewall"
 CACHE_DIR = DATA_DIR + "/province_cache"
@@ -632,7 +635,10 @@ def heading(title):
     if sys.stdout.isatty() and os.environ.get("TERM") != "dumb":
         print("\033[2J\033[H", end="")
     print()
-    table([("◆ vps-firewall " + APP_VERSION + (" / " + title if title else ""),)])
+    rows = [("vps-firewall " + APP_VERSION + "        " + APP_RELEASE_DATE,)]
+    if title:
+        rows.append((title,))
+    table(rows)
 
 
 def display_width(text):
@@ -657,7 +663,7 @@ def wrap_cell(text, width):
     return lines
 
 
-def table(rows, headers=None):
+def table(rows, headers=None, sections=None):
     """Render CJK-aware borders; wrap long addresses instead of cutting them off."""
     rows = [tuple(str(cell) for cell in row) for row in rows]
     columns = len(headers) if headers else len(rows[0])
@@ -667,24 +673,34 @@ def table(rows, headers=None):
     def border(left, middle, right):
         print("  " + left + middle.join("─" * (width + 2) for width in widths) + right)
 
-    def row(cells):
-        wrapped = [wrap_cell(cell, width) for cell, width in zip(cells, widths)]
+    def row(cells, cell_widths=None):
+        cell_widths = widths if cell_widths is None else cell_widths
+        wrapped = [wrap_cell(cell, width) for cell, width in zip(cells, cell_widths)]
         for index in range(max(map(len, wrapped))):
             values = [lines[index] if index < len(lines) else "" for lines in wrapped]
             print("  │" + "│".join(" " + value + " " * (width - display_width(value) + 1)
-                                    for value, width in zip(values, widths)) + "│")
+                                    for value, width in zip(values, cell_widths)) + "│")
 
     border("┌", "┬", "┐")
     if headers:
         row(headers)
-        border("├", "┼", "┤")
-    for cells in rows:
+        if not sections or 0 not in sections:
+            border("├", "┼", "┤")
+    for index, cells in enumerate(rows):
+        if sections and index in sections:
+            title = sections[index]
+            if title:
+                border("├", "┴", "┤")
+                row((title,), [sum(widths) + 3 * (len(widths) - 1)])
+                border("├", "┬", "┤")
+            else:
+                border("├", "┼", "┤")
         row(cells)
     border("└", "┴", "┘")
 
 
-def menu_table(rows):
-    table(rows, headers=("编号", "功能", "数量 / 状态"))
+def menu_table(rows, sections=None):
+    table(rows, headers=("编号", "功能", "数量 / 状态"), sections=sections)
 
 
 def notice(message):
@@ -706,26 +722,25 @@ def protection_status(cfg, active):
 
 def render_home(cfg, active, source=None, synced=True, message=""):
     heading("")
-    print("  防护：" + protection_status(cfg, active))
-    if source:
-        print("  当前登录 IP：" + source)
-    if not synced:
-        print("  提醒：配置尚未同步，请到“维护与日志”检查。")
     print()
     count = sum(len(cfg[key]) for key in ("ips", "cidrs", "provinces"))
     menu_table([
         (1, "白名单管理", "%d 项" % count),
-        (2, "禁止 IP", "%d 项" % len(cfg["blocked_ips"])),
+        (2, "禁止IP", "%d 项" % len(cfg["blocked_ips"])),
         (3, "直通IP地址", "%d 项" % len(cfg["rescue_ips"])),
-        (4, "检查 IP 访问权限", ""),
+        (4, "IP访问权限", ""),
         (5, "访问设置", ""),
         (6, "维护与日志", ""),
         (7, "暂停防护" if cfg["enabled"] else "开启防护", ""),
         (8, "更新程序", ""),
         (9, "卸载程序", ""),
         (0, "退出", ""),
-    ])
+    ], sections={0: "一、IP管理", 4: "二、系统控制", 7: "三、版本控制", 9: ""})
     notice(message)
+    if not synced:
+        print("\n  提醒：配置尚未同步，请到“维护与日志”检查。")
+    print("\n  防护：" + protection_status(cfg, active))
+    print("  当前登录 IP：" + (source or "未检测到"))
 
 
 def whitelist_menu():

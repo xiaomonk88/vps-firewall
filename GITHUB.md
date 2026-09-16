@@ -40,7 +40,7 @@ git commit -m "说明本次修改"
 git push
 ```
 
-准备让 VPS 使用新版本时，把 `VERSION` 改为新的版本号，例如 `1.0.1`，和代码一起提交、推送，然后：
+准备让 VPS 使用新版本时，把 `VERSION` 改为新的版本号，例如 `1.0.1`，同时将 `vps_firewall.py` 中的 `APP_RELEASE_DATE` 更新为本版修改日期（如 `2026.09.16`），并补充 `CHANGELOG.md`，和代码一起提交、推送，然后：
 
 ```powershell
 git tag v1.0.1
