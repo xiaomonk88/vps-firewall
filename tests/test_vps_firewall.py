@@ -670,5 +670,104 @@ class PausedMenu(Workspace):
         self.assertEqual(app.read_state(), previous_state)
 
 
+class FirewallSynchronization(Workspace):
+    def setUp(self):
+        super().setUp()
+        self.install_fake_nft()
+        live = patch.object(app, "live_table", side_effect=lambda: "\ntable inet vps_wl {" in self.rules)
+        live.start()
+        self.addCleanup(live.stop)
+
+    def menu(self, choices):
+        with patch.object(app, "read_choice", side_effect=choices), patch.object(app, "ssh_source", return_value=None):
+            return app.interactive_menu()
+
+    def test_enable_survives_exit_and_fresh_menu(self):
+        app.atomic_write(app.CONFIG_PATH, app.dump_config(config(enabled=False)))
+        self.assertEqual(self.menu(["7", "1", "0"]), 0)
+        self.assertTrue(app.load_config()["enabled"])
+        self.assertTrue(app.live_table())
+        self.output.seek(0)
+        self.output.truncate()
+        self.assertEqual(self.menu(["0"]), 0)
+        self.assertIn("防火墙：开启", self.output.getvalue())
+        self.assertNotIn("防火墙：关闭", self.output.getvalue())
+
+    def test_mismatch_is_not_reported_as_intentional_shutdown(self):
+        self.assertEqual(app.firewall_label(config(), False), "未生效")
+        self.assertEqual(app.firewall_label(config(enabled=False), True), "未关闭")
+        self.assertEqual(app.protection_action(config(), False), "恢复防护")
+        self.assertIn("设置开启", app.protection_status(config(), False))
+
+    def test_menu_repairs_missing_rules_without_turning_saved_switch_off(self):
+        app.apply_once()
+        self.rules = app.render_rules([], enabled=False)
+        self.assertEqual(self.menu(["7", "1", "0"]), 0)
+        self.assertTrue(app.load_config()["enabled"])
+        self.assertTrue(app.live_table())
+        self.assertIn("恢复防护", self.output.getvalue())
+
+    def test_menu_removes_residual_rules_without_turning_saved_switch_on(self):
+        app.atomic_write(app.CONFIG_PATH, app.dump_config(config(enabled=False)))
+        self.rules = app.prepare(config())
+        self.assertEqual(self.menu(["7", "1", "0"]), 0)
+        self.assertFalse(app.load_config()["enabled"])
+        self.assertFalse(app.live_table())
+
+    def test_stable_daemon_does_not_apply_every_poll(self):
+        app.apply_once()
+        self.calls.clear()
+        with patch.object(app.time, "sleep", side_effect=[None, None, SystemExit]), \
+                patch.object(app, "apply_once") as apply:
+            with self.assertRaises(SystemExit):
+                app.daemon()
+        apply.assert_not_called()
+        self.assertFalse(self.calls)
+
+    def test_missing_rules_restore_snapshot_once_without_download_or_history_change(self):
+        app.apply_once()
+        previous_state = app.read_state()
+        good_rules = self.rules
+        self.rules = app.render_rules([], enabled=False)
+        self.calls.clear()
+        with patch.object(app.time, "sleep", side_effect=[None, None, SystemExit]), \
+                patch.object(app, "prepare", side_effect=AssertionError("must restore exact snapshot")):
+            with self.assertRaises(SystemExit):
+                app.daemon()
+        self.assertEqual(self.rules, good_rules)
+        self.assertEqual(app.read_state(), previous_state)
+        self.assertEqual(self.calls, [(good_rules, True), (good_rules, False)])
+        self.assertIn("旧版服务", self.output.getvalue())
+
+    def test_disabled_snapshot_removes_residual_rules(self):
+        app.atomic_write(app.CONFIG_PATH, app.dump_config(config(enabled=False)))
+        app.apply_once()
+        previous_state = app.read_state()
+        self.rules = app.prepare(config())
+        with patch.object(app.time, "sleep", side_effect=SystemExit):
+            with self.assertRaises(SystemExit):
+                app.daemon()
+        self.assertFalse(app.live_table())
+        self.assertEqual(app.read_state(), previous_state)
+
+    def test_no_active_provinces_does_not_trigger_periodic_rule_replacement(self):
+        app.atomic_write(app.CONFIG_PATH, app.dump_config(config(province_refresh=1)))
+        app.apply_once()
+        with patch.object(app.time, "monotonic", side_effect=[0, 100, 200, 300, 400]), \
+                patch.object(app.time, "sleep", side_effect=[None, SystemExit]), \
+                patch.object(app, "apply_once") as apply:
+            with self.assertRaises(SystemExit):
+                app.daemon()
+        apply.assert_not_called()
+
+    def test_status_reports_legacy_service_conflict(self):
+        app.apply_once()
+        with patch.object(app, "run", return_value=SimpleNamespace(stdout="active\n", stderr="", returncode=0)):
+            app.status()
+        self.assertIn("旧版 vps-whitelist 仍在运行", self.output.getvalue())
+        self.assertIn("保存的开关：开启", self.output.getvalue())
+        self.assertIn("实际规则表：存在", self.output.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

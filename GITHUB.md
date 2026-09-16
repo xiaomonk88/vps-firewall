@@ -66,6 +66,6 @@ sudo vps-firewall update --tag v1.0.0
 
 `vps-firewall rollback` 仍表示恢复上一版防火墙配置和规则；它不回退程序版本。跨版本降级前应确认配置兼容性。
 
-旧版本没有 `update` 命令时，重新运行 README 中的一键安装命令即可升级。更早的 `vps-whitelist` 安装使用不同路径，不在此次自动迁移范围内。
+旧版本没有 `update` 命令时，重新运行 README 中的一键安装命令即可升级。从 1.0.8 起，安装器会识别运行 `/opt/vps-whitelist/whitelist.py` 的旧 `vps-whitelist` 服务并停止、禁用它，防止与新版覆盖同一规则表，旧文件仍保留。若运行中的同名服务无法识别，安装会中止并提示检查。旧目录的配置不会自动复制到新版；已有 `/etc/vps-firewall/` 配置继续保留。
 
 本地 Windows 测试不代表已经验证真实 VPS 安装、重启及网络连接。GitHub 的默认测试也会跳过需要 root 的网络测试；可按程序功能说明在 Debian 上运行网络命名空间测试。

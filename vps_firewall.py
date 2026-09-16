@@ -562,23 +562,34 @@ def daemon():
     while True:
         watch = 5
         try:
-            cfg = load_config()
-            watch = cfg["watch_interval"]
-            sig = config_sig()
-            recorded = read_state().get("current")
-            unsynced = not recorded or recorded["config"] != cfg
-            refresh = cfg["province_refresh"]
-            due = cfg["enabled"] and refresh > 0 and time.monotonic() - last_refresh >= refresh
-            missing = live_table() != cfg["enabled"]
-            if (sig != last_sig or due or missing or unsynced) and time.monotonic() >= retry_at:
-                with operation_lock():
-                    recover_pending()
-                    current = read_state().get("current")
-                if not due and not missing and current and current["config"] == cfg:
-                    # Menu/rollback already committed the exact rules. Do not overwrite its snapshot.
-                    last_sig = sig
-                else:
-                    last_sig = apply_once(force_refresh=due)
+            apply_required = False
+            with operation_lock():
+                recover_pending()
+                cfg = load_config()
+                watch = cfg["watch_interval"]
+                sig = config_sig()
+                current = read_state().get("current")
+                unsynced = not current or current["config"] != cfg
+                refresh = cfg["province_refresh"]
+                due = (cfg["enabled"] and bool(active_entries(cfg, "provinces")) and refresh > 0
+                       and time.monotonic() - last_refresh >= refresh)
+                missing = live_table() != cfg["enabled"]
+                if (sig != last_sig or due or missing or unsynced) and time.monotonic() >= retry_at:
+                    if not due and not unsynced:
+                        # Recover the committed policy without downloads or replacing rollback history.
+                        if missing:
+                            nft(current["rules"], check=True)
+                            nft(current["rules"])
+                            log("检测到实际规则与保存的开关不一致，已恢复上次成功规则；若反复出现，请检查旧版服务或其他防火墙程序")
+                        last_sig = sig
+                        retry_at = 0
+                    else:
+                        reason = "省份数据定时刷新" if due else "配置与成功记录不同或尚无成功记录"
+                        log("重新应用原因：" + reason)
+                        apply_required = True
+            if apply_required:
+                # apply_once re-reads configuration under its own lock; never apply a stale menu snapshot.
+                last_sig = apply_once(force_refresh=due)
                 last_refresh = time.monotonic()
                 retry_at = 0
         except Exception as exc:
@@ -646,7 +657,12 @@ def status():
         service = run(["systemctl", "is-active", "vps-firewall"]).stdout.strip()
         current = state.get("current")
         print("  防护状态：" + protection_status(cfg, active))
+        print("  保存的开关：" + ("开启" if cfg["enabled"] else "关闭"))
+        print("  实际规则表：" + ("存在" if active else "缺失"))
         print("  后台服务：" + {"active": "运行中", "inactive": "未运行", "failed": "启动失败"}.get(service, service))
+        if run(["systemctl", "is-active", "vps-whitelist"]).stdout.strip() == "active":
+            print("  服务冲突：旧版 vps-whitelist 仍在运行，可能覆盖同一张规则表。")
+            print("  请升级以停用本项目的旧服务，或先执行 sudo systemctl disable --now vps-whitelist。")
         print("  配置同步：" + ("已同步" if current and current["config"] == cfg else "等待应用，请检查日志"))
         print("  公网 ping：" + ("允许" if cfg["allow_ping"] else "仅白名单"))
         print("  IPv6 访问：" + ("全部放行" if cfg["allow_all_ipv6"] else "按白名单放行"))
@@ -795,12 +811,21 @@ def pause():
     read_choice("\n按回车返回，0 也可返回：")
 
 
+def firewall_label(cfg, active):
+    if cfg["enabled"] != active:
+        return "未生效" if cfg["enabled"] else "未关闭"
+    return "开启" if active else "关闭"
+
+
 def protection_status(cfg, active):
-    if cfg["enabled"] and active:
-        return "已开启"
-    if not cfg["enabled"] and not active:
-        return "已暂停"
-    return "待同步，请查看运行状态"
+    return {"开启": "已开启", "关闭": "已关闭", "未生效": "未生效（设置开启，但实际规则缺失）",
+            "未关闭": "未关闭（设置关闭，但实际规则仍存在）"}[firewall_label(cfg, active)]
+
+
+def protection_action(cfg, active):
+    if cfg["enabled"] != active:
+        return "恢复防护" if cfg["enabled"] else "关闭残留规则"
+    return "暂停防护" if cfg["enabled"] else "开启防护"
 
 
 def render_home(cfg, active, source=None, synced=True, message=""):
@@ -814,21 +839,24 @@ def render_home(cfg, active, source=None, synced=True, message=""):
         (4, "IP访问权限", ""),
         (5, "访问设置", ""),
         (6, "维护与日志", ""),
-        (7, "暂停防护" if cfg["enabled"] else "开启防护", ""),
+        (7, protection_action(cfg, active), ""),
         (8, "更新程序", ""),
         (9, "卸载程序", ""),
         (0, "退出", ""),
     ], sections={0: "一、IP管理", 4: "二、系统控制", 7: "三、版本控制", 9: ""})
     notice(message)
-    if not synced or cfg["enabled"] != active:
+    if cfg["enabled"] != active:
+        print("\n  提醒：保存的开关与实际规则不一致，请选择“%s”或查看运行状态。" % protection_action(cfg, active))
+    elif not synced:
         print("\n  提醒：配置尚未同步，请到“维护与日志”检查。")
-    state = "开启" if active else "关闭"
+    state = firewall_label(cfg, active)
     left_width = display_width("防火墙：" + state)
     right = "当前IP：" + (source or "未检测到")
     width = table_width()
     gap = width - left_width - display_width(right)
     if sys.stdout.isatty() and os.environ.get("TERM") != "dumb" and "NO_COLOR" not in os.environ:
-        state = "\033[%sm%s\033[0m" % ("32" if active else "31", state)
+        color = "33" if cfg["enabled"] != active else "32" if active else "31"
+        state = "\033[%sm%s\033[0m" % (color, state)
     if gap >= 1:
         print("\n  防火墙：%s%s%s" % (state, " " * gap, right))
     else:
@@ -1339,8 +1367,11 @@ def interactive_menu():
                     commit(current["config"], current["rules"], save=True)
                 message = "已恢复最近一次成功配置。"
                 continue
-            current = read_state().get("current")
-            render_home(cfg, live_table(), ssh_source(),
+            with operation_lock():
+                cfg = load_config()
+                current = read_state().get("current")
+                active = live_table()
+            render_home(cfg, active, ssh_source(),
                         bool(current and current["config"] == cfg), message)
             choice = read_choice("请选择：")
             message = ""
@@ -1362,6 +1393,16 @@ def interactive_menu():
             elif choice == "6":
                 maintenance_menu()
             elif choice == "7":
+                if cfg["enabled"] != active:
+                    action = protection_action(cfg, active)
+                    heading(action)
+                    print("  将按保存的开关重新应用规则。")
+                    if confirm("确认%s？" % action) and guard_session(cfg):
+                        edit_config(cfg, cfg)
+                        message = "已按保存的开关重新应用规则。"
+                    else:
+                        message = "已取消，配置未修改。"
+                    continue
                 candidate = copy.deepcopy(cfg)
                 candidate["enabled"] = not cfg["enabled"]
                 heading("暂停防护" if cfg["enabled"] else "开启防护")

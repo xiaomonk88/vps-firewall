@@ -28,6 +28,23 @@ python3 "$SCRIPT_DIR/vps_firewall.py" init --rescue "${1:-${RESCUE_IP:-}}"
 python3 "$SCRIPT_DIR/vps_firewall.py" test
 
 echo '[3/5] 更新程序文件...'
+stop_legacy_service() {
+  local legacy_command
+  legacy_command="$(systemctl show -p ExecStart --value vps-whitelist 2>/dev/null || true)"
+  if [[ "$legacy_command" =~ (^|[[:space:]])/opt/vps-whitelist/whitelist\.py([[:space:]]|$) ]]; then
+    echo '检测到旧版 vps-whitelist 服务，正在停用，避免两个程序覆盖同一张规则表...'
+    systemctl disable --now vps-whitelist || return 1
+    if systemctl is-active --quiet vps-whitelist; then
+      echo '旧版服务仍在运行，停止安装。请先检查 vps-whitelist 服务。'
+      return 1
+    fi
+    echo '旧版服务已停用，旧配置和程序文件保留。'
+  elif systemctl is-active --quiet vps-whitelist; then
+    echo '发现运行中的 vps-whitelist，但启动命令不属于本项目的旧安装；请先检查该服务，安装已停止。'
+    return 1
+  fi
+}
+stop_legacy_service
 # 停止旧进程，防止旧版本继续覆盖规则；停止服务本身不会清除现有防火墙。
 systemctl stop vps-firewall 2>/dev/null || true
 safe_install() {
