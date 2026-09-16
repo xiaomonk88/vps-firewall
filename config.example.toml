@@ -1,0 +1,27 @@
+# 实际安装会生成 /etc/vps-firewall/config.toml，无须复制本示例。
+# 修改后自动重载；更推荐使用 sudo vps-firewall 中文菜单。
+enabled = true
+
+# 开启时至少保留一个真实管理地址。示例地址不能用于实际登录。
+# 支持 IPv4、IPv6 及网段；管理地址不得与禁止列表重叠。
+rescue_ips = ["203.0.113.99"]
+provinces = []
+cidrs = []
+ips = []
+
+# 明确禁止单个 IPv4/IPv6，优先于省份、普通白名单和 IPv6 总放行。
+blocked_ips = []
+
+# 公网 ping 例外；关闭后白名单地址仍可 ping。
+allow_ping = true
+# false 时 IPv6 业务入站同样按 IPv6 白名单过滤。
+allow_all_ipv6 = false
+# 同样保护 Docker/NAT 映射端口；普通路由转发不在此范围内。
+protect_dnat = true
+
+# 最小 5 秒；下载数据和执行规则会增加生效等待时间。
+watch_interval = 5
+# 0 关闭定时刷新，仍可从菜单手动刷新。下载失败使用旧缓存。
+province_refresh = 86400
+# 自定义源优先，其次尝试内置源和镜像。
+province_source_base = ""
