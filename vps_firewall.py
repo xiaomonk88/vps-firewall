@@ -23,6 +23,11 @@ try:
 except ImportError:
     tomllib = None
 
+try:
+    APP_VERSION = Path(__file__).with_name("VERSION").read_text(encoding="utf-8").strip() or "未知"
+except OSError:
+    APP_VERSION = "未知"
+
 CONFIG_PATH = "/etc/vps-firewall/config.toml"
 DATA_DIR = "/var/lib/vps-firewall"
 CACHE_DIR = DATA_DIR + "/province_cache"
@@ -567,6 +572,7 @@ def matching_sources(cfg, address, use_cache=True):
 
 
 def status():
+    print("  程序版本：vps-firewall " + APP_VERSION)
     with operation_lock():
         cfg = load_config()
         state = read_state()
@@ -626,7 +632,7 @@ def heading(title):
     if sys.stdout.isatty() and os.environ.get("TERM") != "dumb":
         print("\033[2J\033[H", end="")
     print()
-    table([("◆ vps-firewall" + (" / " + title if title else ""),)])
+    table([("◆ vps-firewall " + APP_VERSION + (" / " + title if title else ""),)])
 
 
 def display_width(text):
@@ -1223,6 +1229,8 @@ def main():
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(prog="vps-firewall", description="vps-firewall；无参数直接进入中文菜单")
+    parser.add_argument("--version", action="version", version="%(prog)s " + APP_VERSION,
+                        help="显示当前程序版本并退出")
     parser.add_argument("command", nargs="?", default="menu",
                         choices=["menu", "config", "apply", "reload", "daemon", "status",
                                  "rollback", "test", "check", "init", "migrate", "boot",
@@ -1235,7 +1243,7 @@ def main():
         parser.error("--tag 仅用于 update")
     try:
         if args.command == "version":
-            print("vps-firewall " + Path(__file__).with_name("VERSION").read_text().strip())
+            print("vps-firewall " + APP_VERSION)
             return 0
         if sys.platform != "linux":
             raise AppError("运行防火墙需 Debian 12/13；当前系统仅可进行源码测试")

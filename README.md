@@ -24,6 +24,7 @@ sudo apt-get update && sudo apt-get install -y curl ca-certificates python3
 
 ```bash
 vps-firewall version              # 查看当前程序版本
+vps-firewall --version            # 同样可以查看版本，无需 sudo
 sudo vps-firewall update          # 更新到最新正式 Release
 sudo vps-firewall update --tag v1.0.0  # 指定版本
 ```
@@ -31,6 +32,8 @@ sudo vps-firewall update --tag v1.0.0  # 指定版本
 更新保留现有配置和数据，更新前备份程序及配置到 `/var/backups/vps-firewall/`。仅推送 GitHub 代码不会让 VPS 自动更新。还没有 `update` 命令的版本可重新运行一键安装命令。
 
 本地开发、上传代码和发布新版本的步骤见 [GITHUB.md](GITHUB.md)。
+
+主菜单、子菜单标题和运行状态都会显示当前程序版本。版本号统一读取程序目录内的 `VERSION`，正式发布的 GitHub 标签与它保持一致，例如 `1.0.1` 对应 `v1.0.1`。
 
 ## 手动上传、安装、打开菜单
 
@@ -55,7 +58,7 @@ sudo bash install.sh '管理IP1,管理IP2'
 
 ```text
   ┌──────────────────────────────────────┐
-  │ ◆ vps-firewall                       │
+  │ ◆ vps-firewall 1.0.1                 │
   └──────────────────────────────────────┘
   防护：已开启
   当前登录 IP：203.0.113.10
