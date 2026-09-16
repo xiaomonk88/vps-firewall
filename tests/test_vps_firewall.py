@@ -319,6 +319,55 @@ class CacheAndMigration(Workspace):
         self.assertEqual(path.read_text(), "192.0.2.0/24\n")
 
 
+class ProgramMenu(Workspace):
+    def run_menu(self, choices, returncode=0, restart_error=None):
+        with patch.object(app, "read_choice", side_effect=choices), \
+                patch.object(app, "live_table", return_value=True), \
+                patch.object(app, "ssh_source", return_value=None), \
+                patch.object(app.subprocess, "call", return_value=returncode) as command, \
+                patch.object(app.os, "execv", side_effect=restart_error) as restart:
+            result = app.interactive_menu()
+        return result, command, restart
+
+    def test_cancel_update_and_uninstall_never_launches_commands(self):
+        for choice in ("8", "9"):
+            for answer in ("0", ""):
+                with self.subTest(choice=choice, answer=answer):
+                    result, command, restart = self.run_menu([choice, answer, "0"])
+                    self.assertEqual(result, 0)
+                    command.assert_not_called()
+                    restart.assert_not_called()
+
+    def test_successful_update_replaces_menu_with_installed_program(self):
+        result, command, restart = self.run_menu(["8", "1"])
+        self.assertEqual(result, 0)
+        command.assert_called_once_with([app.sys.executable,
+                                         str(Path(app.__file__).with_name("github_install.py"))])
+        restart.assert_called_once_with(app.sys.executable,
+                                        [app.sys.executable, "/opt/vps-firewall/vps_firewall.py", "menu"])
+
+    def test_successful_uninstall_exits_without_reading_deleted_config(self):
+        result, command, restart = self.run_menu(["9", "1"])
+        self.assertEqual(result, 0)
+        command.assert_called_once_with(["bash", str(Path(app.__file__).with_name("uninstall.sh")), "--yes"])
+        restart.assert_not_called()
+
+    def test_failed_update_and_uninstall_exits_without_restart(self):
+        for choice in ("8", "9"):
+            with self.subTest(choice=choice):
+                result, command, restart = self.run_menu([choice, "1"], returncode=1)
+                self.assertEqual(result, 1)
+                command.assert_called_once()
+                restart.assert_not_called()
+        self.assertIn("未完成", self.output.getvalue())
+
+    def test_failed_menu_restart_does_not_continue_using_old_code(self):
+        result, command, restart = self.run_menu(["8", "1"], restart_error=OSError("missing program"))
+        self.assertEqual(result, 1)
+        restart.assert_called_once()
+        self.assertIn("missing program", self.output.getvalue())
+
+
 class Menu(Workspace):
     def test_main_navigation_returns_directly_from_submenu(self):
         answers = iter(["2", "0"])

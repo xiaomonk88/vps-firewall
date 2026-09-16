@@ -721,6 +721,8 @@ def render_home(cfg, active, source=None, synced=True, message=""):
         (5, "访问设置", ""),
         (6, "维护与日志", ""),
         (7, "暂停防护" if cfg["enabled"] else "开启防护", ""),
+        (8, "更新程序", ""),
+        (9, "卸载程序", ""),
         (0, "退出", ""),
     ])
     notice(message)
@@ -1100,6 +1102,36 @@ def maintenance_menu():
             message = "操作未完成：" + str(exc)
 
 
+def update_program(tag=None):
+    command = [sys.executable, str(Path(__file__).with_name("github_install.py"))]
+    if tag:
+        command.extend(["--tag", tag])
+    return subprocess.call(command)
+
+
+def program_menu(action):
+    heading(action)
+    if action == "更新程序":
+        print("  当前版本：" + APP_VERSION)
+        print("  将检查并安装最新正式版本，保留现有配置和数据。")
+        print("  完成后自动重新打开菜单。")
+        if not confirm("确认更新程序？"):
+            return None
+        result = update_program()
+        if result == 0:
+            # Replace this process so the menu uses the newly installed code and version.
+            os.execv(sys.executable, [sys.executable, "/opt/vps-firewall/vps_firewall.py", "menu"])
+    else:
+        print("  将停止防护，删除本程序的规则、服务和安装文件。")
+        print("  配置、缓存和历史会先备份，备份位置将在卸载后显示。")
+        if not confirm("确认卸载程序？"):
+            return None
+        result = subprocess.call(["bash", str(Path(__file__).with_name("uninstall.sh")), "--yes"])
+    if result != 0:
+        print("\n  %s未完成，请检查上方错误信息。菜单已退出。" % action)
+    return result
+
+
 def interactive_menu():
     message = ""
     while True:
@@ -1152,8 +1184,18 @@ def interactive_menu():
                     message = save_from_menu(cfg, candidate)
                 else:
                     message = "已取消，防护状态未改变。"
+            elif choice in ("8", "9"):
+                action = "更新程序" if choice == "8" else "卸载程序"
+                try:
+                    result = program_menu(action)
+                except OSError as exc:
+                    print("\n  %s未完成：%s。菜单已退出。" % (action, exc))
+                    return 1
+                if result is not None:
+                    return result
+                message = "已取消%s。" % action
             else:
-                message = "请输入 0 到 7 之间的编号。"
+                message = "请输入 0 到 9 之间的编号。"
         except (AppError, OSError, ValueError) as exc:
             message = "操作未完成：" + str(exc)
             # Avoid an immediate redraw loop if reading configuration/firewall itself failed.
@@ -1250,10 +1292,7 @@ def main():
         if os.geteuid() != 0:
             raise AppError("请使用 sudo vps-firewall 运行")
         if args.command == "update":
-            command = [sys.executable, str(Path(__file__).with_name("github_install.py"))]
-            if args.tag:
-                command.extend(["--tag", args.tag])
-            return subprocess.call(command)
+            return update_program(args.tag)
         elif args.command == "init":
             initialize(args.rescue)
         elif args.command == "migrate":
