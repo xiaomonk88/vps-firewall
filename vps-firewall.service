@@ -1,0 +1,19 @@
+[Unit]
+Description=vps-firewall inbound firewall daemon
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/python3 /opt/vps-firewall/vps_firewall.py boot
+ExecStart=/usr/bin/python3 /opt/vps-firewall/vps_firewall.py daemon
+Restart=always
+RestartSec=5
+Environment=PYTHONUTF8=1
+UMask=0077
+TimeoutStartSec=1800
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

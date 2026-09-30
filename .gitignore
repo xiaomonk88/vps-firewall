@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.idea/
+.vscode/
+.env
+.env.*
+!.env.example
+config.toml
+state.json
+pending.json
+province_cache/
+*.log
+*.pem
+*.key
